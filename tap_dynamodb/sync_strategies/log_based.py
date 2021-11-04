@@ -1,6 +1,7 @@
 import datetime
 from singer import metadata
 import singer
+import pytz
 
 from tap_dynamodb import dynamodb
 from tap_dynamodb import deserialize
@@ -85,7 +86,9 @@ def sync_shard(shard, seq_number_bookmarks, streams_client, stream_arn, projecti
     for record in get_shard_records(streams_client, stream_arn, shard, seq_number):
         if record['eventName'] == 'REMOVE':
             record_message = deserializer.deserialize_item(record['dynamodb']['Keys'])
-            record_message[SDC_DELETED_AT] = singer.utils.strftime(record['dynamodb']['ApproximateCreationDateTime'])
+            time = record['dynamodb']['ApproximateCreationDateTime']
+            time = time.replace(tzinfo=pytz.UTC)
+            record_message[SDC_DELETED_AT] = singer.utils.strftime(time)
         else:
             record_message = deserializer.deserialize_item(record['dynamodb'].get('NewImage'))
             if record_message is None:
@@ -114,6 +117,10 @@ def sync_shard(shard, seq_number_bookmarks, streams_client, stream_arn, projecti
 
     singer.write_state(state)
     return rows_synced
+
+
+def convert_list_to_dict(l):
+    return {str(k): v for k, v in enumerate(l)}
 
 
 def sync(config, state, stream):
@@ -148,6 +155,8 @@ def sync(config, state, stream):
     finished_shard_bookmarks = singer.get_bookmark(state, table_name, 'finished_shards')
     if not finished_shard_bookmarks:
         finished_shard_bookmarks = []
+    if isinstance(finished_shard_bookmarks, dict):
+        finished_shard_bookmarks = list(finished_shard_bookmarks.values())
 
     # The list of shardIds we found this sync. Is used to determine which
     # finished_shard_bookmarks to kill
@@ -165,10 +174,10 @@ def sync(config, state, stream):
                                       streams_client, stream_arn, projection, deserializer,
                                       table_name, stream_version, state)
 
-        # Now that we have fully synced the shard, move it from the
-        # shard_seq_numbers to finished_shards.
-        finished_shard_bookmarks.append(shard['ShardId'])
-        state = singer.write_bookmark(state, table_name, 'finished_shards', finished_shard_bookmarks)
+            # Now that we have fully synced the shard, move it from the
+            # shard_seq_numbers to finished_shards.
+            finished_shard_bookmarks.append(shard['ShardId'])
+            state = singer.write_bookmark(state, table_name, 'finished_shards', convert_list_to_dict(finished_shard_bookmarks))
 
         if seq_number_bookmarks.get(shard['ShardId']):
             seq_number_bookmarks.pop(shard['ShardId'])
@@ -180,7 +189,7 @@ def sync(config, state, stream):
         if shardId not in found_shards:
             # Remove this shard because its no longer appearing when we query for get_shards
             finished_shard_bookmarks.remove(shardId)
-            state = singer.write_bookmark(state, table_name, 'finished_shards', finished_shard_bookmarks)
+            state = singer.write_bookmark(state, table_name, 'finished_shards', convert_list_to_dict(finished_shard_bookmarks))
 
     singer.write_state(state)
 
@@ -229,6 +238,6 @@ def get_initial_bookmarks(config, state, table_name):
     stream_arn = table['LatestStreamArn']
 
     finished_shard_bookmarks = [shard['ShardId'] for shard in get_shards(streams_client, stream_arn)]
-    state = singer.write_bookmark(state, table_name, 'finished_shards', finished_shard_bookmarks)
+    state = singer.write_bookmark(state, table_name, 'finished_shards', convert_list_to_dict(finished_shard_bookmarks))
 
     return state
